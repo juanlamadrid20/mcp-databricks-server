@@ -60,7 +60,11 @@ Start the MCP server:
 python main.py
 ```
 
-The server will be available at http://localhost:8000.
+You can test the MCP server using the inspector by running 
+
+```
+npx @modelcontextprotocol/inspector python3 main.py
+```
 
 ## Available MCP Tools
 
@@ -90,27 +94,9 @@ When used with LLMs that support the MCP protocol, this server enables natural l
 - Verify your personal access token has the necessary permissions
 - Run the included test script: `python test_connection.py`
 
-### Common Errors
-
-- **"Error loading ASGI app"**: Make sure you're using the correct import in uvicorn.run() command
-- **"Missing required Databricks connection details"**: Check your .env file is properly formatted and loaded
-- **"Arrow is not installed"**: Make sure pyarrow is installed (`pip install pyarrow`)
-
-### API Testing
-
-You can test the API directly using curl:
-
-```
-curl -X POST "http://localhost:8000/mcp/tools/run_sql_query" -H "Content-Type: application/json" -d '{"sql": "SELECT 1 as test"}'
-```
-
 ## Security Considerations
 
 - Your Databricks personal access token provides direct access to your workspace
 - Secure your `.env` file and never commit it to version control
 - Consider using Databricks token with appropriate permission scopes only
 - Run this server in a secure environment
-
-## API Documentation
-
-After starting the server, you can access the API documentation at http://localhost:8000/docs 
