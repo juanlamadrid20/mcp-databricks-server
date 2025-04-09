@@ -1,11 +1,10 @@
 import os
-from typing import List, Dict, Any, Optional
+from typing import Dict
 from dotenv import load_dotenv
 from databricks.sql import connect
 from databricks.sql.client import Connection
 from mcp.server.fastmcp import FastMCP
 import requests
-import json
 
 # Load environment variables
 load_dotenv()
@@ -76,9 +75,7 @@ def get_schema() -> str:
 @mcp.tool()
 def run_sql_query(sql: str) -> str:
     """Execute SQL queries on Databricks SQL warehouse"""
-    print(sql)
     conn = get_databricks_connection()
-    print("connected")
 
     try:
         cursor = conn.cursor()
@@ -212,10 +209,5 @@ def get_job_details(job_id: int) -> str:
     except Exception as e:
         return f"Error getting job details: {str(e)}"
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
-
 if __name__ == "__main__":
-    #run_sql_query("SELECT * FROM dev.dev_test.income_survey_dataset LIMIT 10;")
     mcp.run()
