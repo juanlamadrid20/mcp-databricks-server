@@ -1,18 +1,37 @@
 import os
-from typing import Dict
+from typing import Dict, Any
 from dotenv import load_dotenv
 from databricks.sql import connect
 from databricks.sql.client import Connection
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.compute import (
+    AutoScale,
+    ClusterAttributes,
+    DataSecurityMode,
+    Kind
+)
 from mcp.server.fastmcp import FastMCP
 import requests
+import logging
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Get Databricks credentials from environment variables
 DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")
 DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
 DATABRICKS_HTTP_PATH = os.getenv("DATABRICKS_HTTP_PATH")
+
+# Initialize WorkspaceClient with error handling
+try:
+    w = WorkspaceClient()
+except Exception as e:
+    logger.error(f"Failed to initialize WorkspaceClient: {e}")
+    w = None
 
 # Set up the MCP server
 mcp = FastMCP("Databricks API Explorer")
@@ -52,6 +71,45 @@ def databricks_api_request(endpoint: str, method: str = "GET", data: Dict = None
     
     response.raise_for_status()
     return response.json()
+
+# Helper function to generate cluster configuration
+def get_cluster_config(
+    cluster_name: str,
+    spark_version: str,
+    node_type: str,
+    min_workers: int,
+    max_workers: int,
+    user_email: str,
+    autotermination_minutes: int = 60,
+    use_ml_runtime: bool = True,
+    is_single_node: bool = False
+) -> Dict[str, Any]:
+    """Generate cluster configuration with validation."""
+    if not all([cluster_name, spark_version, node_type, user_email]):
+        raise ValueError("Missing required configuration parameters")
+    
+    return {
+        "cluster_name": cluster_name,
+        "spark_version": spark_version,
+        "node_type_id": node_type,
+        "driver_node_type_id": node_type,
+        "autotermination_minutes": autotermination_minutes,
+        "single_user_name": user_email,
+        "data_security_mode": DataSecurityMode.DATA_SECURITY_MODE_AUTO,
+        "use_ml_runtime": use_ml_runtime,
+        "is_single_node": is_single_node,
+        "kind": Kind.CLASSIC_PREVIEW,
+        "autoscale": AutoScale(
+            min_workers=min_workers,
+            max_workers=max_workers
+        ),
+        "spark_conf": {
+            "spark.speculation": "true"
+        },
+        "custom_tags": {
+            "Project": "mcp-databricks-server"
+        }
+    }
 
 @mcp.resource("schema://tables")
 def get_schema() -> str:
@@ -208,6 +266,128 @@ def get_job_details(job_id: int) -> str:
         return result
     except Exception as e:
         return f"Error getting job details: {str(e)}"
+
+@mcp.tool()
+def create_cluster(
+    cluster_name: str,
+    spark_version: str,
+    node_type: str,
+    min_workers: int,
+    max_workers: int,
+    user_email: str,
+    autotermination_minutes: int = 60,
+    use_ml_runtime: bool = True,
+    is_single_node: bool = False,
+    wait_for_completion: bool = False
+) -> str:
+    """Create a Databricks cluster with the specified configuration"""
+    if w is None:
+        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
+    
+    try:
+        # Generate cluster configuration
+        config = get_cluster_config(
+            cluster_name=cluster_name,
+            spark_version=spark_version,
+            node_type=node_type,
+            min_workers=min_workers,
+            max_workers=max_workers,
+            user_email=user_email,
+            autotermination_minutes=autotermination_minutes,
+            use_ml_runtime=use_ml_runtime,
+            is_single_node=is_single_node
+        )
+        
+        if wait_for_completion:
+            # Create cluster and wait for completion
+            response = w.clusters.create_and_wait(**config)
+            logger.info(f"Cluster created successfully: {response.cluster_id}")
+            return f"Cluster '{cluster_name}' created successfully with ID: {response.cluster_id}"
+        else:
+            # Create cluster without waiting (non-blocking)
+            response = w.clusters.create(**config)
+            logger.info(f"Cluster creation initiated: {response.cluster_id}")
+            return f"Cluster '{cluster_name}' creation initiated with ID: {response.cluster_id}"
+            
+    except Exception as e:
+        logger.error(f"Failed to create cluster: {e}")
+        return f"Error creating cluster: {str(e)}"
+
+@mcp.tool()
+def delete_cluster(cluster_id: str, confirm: bool = False) -> str:
+    """Delete a Databricks cluster with confirmation"""
+    if w is None:
+        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
+    
+    if not confirm:
+        return "Deletion not confirmed. Set confirm=True to proceed with cluster deletion."
+    
+    try:
+        w.clusters.permanent_delete(cluster_id=cluster_id)
+        logger.info(f"Cluster {cluster_id} deleted successfully")
+        return f"Cluster {cluster_id} deleted successfully"
+    except Exception as e:
+        logger.error(f"Failed to delete cluster {cluster_id}: {e}")
+        return f"Error deleting cluster {cluster_id}: {str(e)}"
+
+@mcp.tool()
+def list_clusters() -> str:
+    """List all Databricks clusters"""
+    if w is None:
+        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
+    
+    try:
+        clusters = w.clusters.list()
+        
+        if not clusters:
+            return "No clusters found."
+        
+        # Format as markdown table
+        table = "| Cluster ID | Cluster Name | State | Spark Version | Node Type | Workers |\n"
+        table += "| ---------- | ------------ | ----- | ------------- | --------- | ------- |\n"
+        
+        for cluster in clusters:
+            cluster_id = cluster.cluster_id or "N/A"
+            cluster_name = cluster.cluster_name or "N/A"
+            state = cluster.state.value if cluster.state else "N/A"
+            spark_version = cluster.spark_version or "N/A"
+            node_type = cluster.node_type_id or "N/A"
+            workers = f"{cluster.num_workers}" if cluster.num_workers else "N/A"
+            
+            table += f"| {cluster_id} | {cluster_name} | {state} | {spark_version} | {node_type} | {workers} |\n"
+        
+        return table
+    except Exception as e:
+        logger.error(f"Failed to list clusters: {e}")
+        return f"Error listing clusters: {str(e)}"
+
+@mcp.tool()
+def get_cluster_status(cluster_id: str) -> str:
+    """Get the status and details of a specific Databricks cluster"""
+    if w is None:
+        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
+    
+    try:
+        cluster = w.clusters.get(cluster_id)
+        
+        result = f"## Cluster Details: {cluster.cluster_name}\n\n"
+        result += f"- **Cluster ID:** {cluster.cluster_id}\n"
+        result += f"- **State:** {cluster.state.value if cluster.state else 'N/A'}\n"
+        result += f"- **Spark Version:** {cluster.spark_version or 'N/A'}\n"
+        result += f"- **Node Type:** {cluster.node_type_id or 'N/A'}\n"
+        result += f"- **Driver Node Type:** {cluster.driver_node_type_id or 'N/A'}\n"
+        result += f"- **Workers:** {cluster.num_workers or 'N/A'}\n"
+        result += f"- **Auto-termination:** {cluster.autotermination_minutes or 'N/A'} minutes\n"
+        result += f"- **Single User:** {cluster.single_user_name or 'N/A'}\n"
+        result += f"- **Created:** {cluster.start_time or 'N/A'}\n"
+        
+        if cluster.autoscale:
+            result += f"- **Auto-scaling:** Min: {cluster.autoscale.min_workers}, Max: {cluster.autoscale.max_workers}\n"
+        
+        return result
+    except Exception as e:
+        logger.error(f"Failed to get cluster status: {e}")
+        return f"Error getting cluster status: {str(e)}"
 
 if __name__ == "__main__":
     mcp.run()
