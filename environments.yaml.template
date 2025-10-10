@@ -1,0 +1,36 @@
+# Multi-Environment Configuration Template
+# Copy this file to 'environments.yaml' and fill in your actual credentials
+# NEVER commit environments.yaml to version control!
+
+default: development
+
+environments:
+  development:
+    name: development
+    host: YOUR_DEV_WORKSPACE.cloud.databricks.com
+    token: dapi_YOUR_DEV_TOKEN_HERE
+    http_path: /sql/1.0/warehouses/YOUR_DEV_WAREHOUSE_ID
+    description: "Development environment for testing"
+    tags:
+      - dev
+      - testing
+
+  staging:
+    name: staging
+    host: YOUR_STAGING_WORKSPACE.cloud.databricks.com
+    token: dapi_YOUR_STAGING_TOKEN_HERE
+    http_path: /sql/1.0/warehouses/YOUR_STAGING_WAREHOUSE_ID
+    description: "Staging environment for pre-production testing"
+    tags:
+      - staging
+      - pre-production
+
+  production:
+    name: production
+    host: YOUR_PROD_WORKSPACE.cloud.databricks.com
+    token: dapi_YOUR_PROD_TOKEN_HERE
+    http_path: /sql/1.0/warehouses/YOUR_PROD_WAREHOUSE_ID
+    description: "Production environment"
+    tags:
+      - production
+      - critical

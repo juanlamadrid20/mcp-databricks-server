@@ -136,6 +136,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Multi-environment configuration (contains credentials)
+environments.yaml
+
 # Spyder project settings
 .spyderproject
 .spyproject
