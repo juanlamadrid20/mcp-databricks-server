@@ -29,11 +29,18 @@ def get_current_environment() -> str:
     """
     try:
         env_manager = EnvironmentManager()
+        
+        # Initialize if not already done
+        if env_manager._configuration is None:
+            logger.info("Environment manager not initialized, initializing now...")
+            env_manager.load_configuration()
+            env_manager.set_active_to_default()
+        
         return env_manager.get_active_environment_info()
     except Exception as e:
         logger.error(f"Failed to get current environment: {e}")
         error_msg = (
-            "No active environment set. This should not happen. "
-            "Please restart the server."
+            f"Error getting current environment: {str(e)}\n"
+            "Please ensure your environments.yaml or .env file is properly configured."
         )
         raise RuntimeError(error_msg)

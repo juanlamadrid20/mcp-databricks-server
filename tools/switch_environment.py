@@ -31,6 +31,13 @@ def switch_environment(name: str) -> str:
     """
     try:
         env_manager = EnvironmentManager()
+        
+        # Initialize if not already done
+        if env_manager._configuration is None:
+            logger.info("Environment manager not initialized, initializing now...")
+            env_manager.load_configuration()
+            env_manager.set_active_to_default()
+        
         result = env_manager.switch_to_environment(name)
         return result
     except Exception as e:
