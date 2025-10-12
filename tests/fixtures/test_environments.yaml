@@ -1,0 +1,30 @@
+# Test fixture: Valid multi-environment configuration
+default: dev
+
+environments:
+  dev:
+    name: dev
+    host: dev-workspace.cloud.databricks.com
+    token: dapi_dev_token_123456
+    http_path: /sql/1.0/warehouses/dev_warehouse
+    description: "Development environment for testing"
+    tags:
+      - development
+      - testing
+
+  prod:
+    name: prod
+    host: prod-workspace.cloud.databricks.com
+    token: dapi_prod_token_789012
+    http_path: /sql/1.0/warehouses/prod_warehouse
+    description: "Production environment"
+    tags:
+      - production
+      - critical
+
+  staging:
+    name: staging
+    host: staging-workspace.cloud.databricks.com
+    token: dapi_staging_token_345678
+    http_path: /sql/1.0/warehouses/staging_warehouse
+    description: "Staging environment"

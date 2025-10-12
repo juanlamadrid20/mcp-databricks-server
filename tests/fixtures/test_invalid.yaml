@@ -1,0 +1,7 @@
+# Test fixture: Invalid configuration (missing default)
+environments:
+  dev:
+    name: dev
+    host: dev-workspace.cloud.databricks.com
+    token: dapi_dev_token_123456
+    http_path: /sql/1.0/warehouses/dev_warehouse

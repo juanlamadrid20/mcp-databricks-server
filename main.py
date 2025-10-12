@@ -1,76 +1,146 @@
-import os
 from typing import Dict, Any
-from dotenv import load_dotenv
 from databricks.sql import connect
 from databricks.sql.client import Connection
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.compute import (
     AutoScale,
-    ClusterAttributes,
     DataSecurityMode,
     Kind
 )
 from mcp.server.fastmcp import FastMCP
 import requests
 import logging
+import sys
 
-# Load environment variables
-load_dotenv()
+# CRITICAL FIX: Remove all existing handlers and force everything to stderr
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to stderr ONLY
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    force=True
+)
 logger = logging.getLogger(__name__)
 
-# Get Databricks credentials from environment variables
-DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")
-DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
-DATABRICKS_HTTP_PATH = os.getenv("DATABRICKS_HTTP_PATH")
+# Import environment management
+from config.manager import EnvironmentManager
+from tools.switch_environment import switch_environment
+from tools.get_current_environment import get_current_environment
+
+# Initialize environment manager as None - will be lazily loaded
+env_manager = None
 
 # Initialize WorkspaceClient with error handling
-try:
-    w = WorkspaceClient()
-except Exception as e:
-    logger.error(f"Failed to initialize WorkspaceClient: {e}")
-    w = None
+# Note: WorkspaceClient will be lazily initialized when needed
+w = None
 
 # Set up the MCP server
 mcp = FastMCP("Databricks API Explorer")
 
 
+def get_env_manager() -> EnvironmentManager:
+    """Get or initialize the environment manager lazily."""
+    global env_manager
+    if env_manager is None:
+        env_manager = EnvironmentManager()
+        try:
+            env_manager.load_configuration()
+            env_manager.set_active_to_default()
+            logger.info("Environment manager initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize environment manager: {e}")
+            raise
+    return env_manager
+
+
 # Helper function to get a Databricks SQL connection
 def get_databricks_connection() -> Connection:
-    """Create and return a Databricks SQL connection"""
-    if not all([DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_HTTP_PATH]):
-        raise ValueError("Missing required Databricks connection details in .env file")
+    """Create and return a Databricks SQL connection using active environment"""
+    try:
+        credentials = get_env_manager().get_active_credentials()
 
-    return connect(
-        server_hostname=DATABRICKS_HOST,
-        http_path=DATABRICKS_HTTP_PATH,
-        access_token=DATABRICKS_TOKEN
-    )
+        if not credentials:
+            raise ValueError("No active environment configured")
+
+        return connect(
+            server_hostname=credentials['host'],
+            http_path=credentials['http_path'],
+            access_token=credentials['token']
+        )
+    except Exception as e:
+        active_env = get_env_manager().get_active_environment_name()
+        logger.error(f"Failed to connect to Databricks: {e}")
+        raise ValueError(
+            f"Error: Failed to connect to Databricks.\n"
+            f"Current environment: {active_env}\n"
+            f"Details: {str(e)}\n\n"
+            f"Please check your credentials or switch to a different environment."
+        )
+
+
+def get_workspace_client() -> WorkspaceClient:
+    """Get or initialize WorkspaceClient with active environment credentials"""
+    global w
+
+    try:
+        credentials = get_env_manager().get_active_credentials()
+
+        if not credentials:
+            raise ValueError("No active environment configured")
+
+        # Create new WorkspaceClient with current credentials
+        w = WorkspaceClient(
+            host=f"https://{credentials['host']}",
+            token=credentials['token']
+        )
+        return w
+    except Exception as e:
+        active_env = get_env_manager().get_active_environment_name()
+        logger.error(f"Failed to initialize WorkspaceClient: {e}")
+        raise ValueError(
+            f"Error: Failed to initialize Databricks WorkspaceClient.\n"
+            f"Current environment: {active_env}\n"
+            f"Details: {str(e)}"
+        )
+
 
 # Helper function for Databricks REST API requests
 def databricks_api_request(endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
-    """Make a request to the Databricks REST API"""
-    if not all([DATABRICKS_HOST, DATABRICKS_TOKEN]):
-        raise ValueError("Missing required Databricks API credentials in .env file")
-    
-    headers = {
-        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    url = f"https://{DATABRICKS_HOST}/api/2.0/{endpoint}"
-    
-    if method.upper() == "GET":
-        response = requests.get(url, headers=headers)
-    elif method.upper() == "POST":
-        response = requests.post(url, headers=headers, json=data)
-    else:
-        raise ValueError(f"Unsupported HTTP method: {method}")
-    
-    response.raise_for_status()
-    return response.json()
+    """Make a request to the Databricks REST API using active environment credentials"""
+    try:
+        credentials = get_env_manager().get_active_credentials()
+
+        if not credentials:
+            raise ValueError("No active environment configured")
+
+        headers = {
+            "Authorization": f"Bearer {credentials['token']}",
+            "Content-Type": "application/json"
+        }
+
+        url = f"https://{credentials['host']}/api/2.0/{endpoint}"
+
+        if method.upper() == "GET":
+            response = requests.get(url, headers=headers)
+        elif method.upper() == "POST":
+            response = requests.post(url, headers=headers, json=data)
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        active_env = get_env_manager().get_active_environment_name()
+        logger.error(f"Databricks API request failed: {e}")
+        raise ValueError(
+            f"Error: Failed to connect to Databricks API.\n"
+            f"Current environment: {active_env}\n"
+            f"Details: {str(e)}"
+        )
+
 
 # Helper function to generate cluster configuration
 def get_cluster_config(
@@ -87,7 +157,7 @@ def get_cluster_config(
     """Generate cluster configuration with validation."""
     if not all([cluster_name, spark_version, node_type, user_email]):
         raise ValueError("Missing required configuration parameters")
-    
+
     return {
         "cluster_name": cluster_name,
         "spark_version": spark_version,
@@ -111,161 +181,197 @@ def get_cluster_config(
         }
     }
 
+
+# ============================================================================
+# Environment Management Tools (NEW)
+# ============================================================================
+
+@mcp.tool()
+def mcp_switch_environment(name: str) -> str:
+    """
+    Switch the active Databricks environment.
+
+    Args:
+        name: The name of the environment to switch to
+
+    Returns:
+        Success message with environment details
+    """
+    return switch_environment(name)
+
+
+@mcp.tool()
+def mcp_get_current_environment() -> str:
+    """
+    Get the currently active Databricks environment.
+
+    Returns:
+        Formatted string with current environment details
+    """
+    return get_current_environment()
+
+
+# ============================================================================
+# Existing MCP Tools (Modified to use environment manager)
+# ============================================================================
+
 @mcp.resource("schema://tables")
 def get_schema() -> str:
     """Provide the list of tables in the Databricks SQL warehouse as a resource"""
-    conn = get_databricks_connection()
     try:
+        conn = get_databricks_connection()
         cursor = conn.cursor()
         tables = cursor.tables().fetchall()
-        
+
         table_info = []
         for table in tables:
             table_info.append(f"Database: {table.TABLE_CAT}, Schema: {table.TABLE_SCHEM}, Table: {table.TABLE_NAME}")
-        
+
+        conn.close()
         return "\n".join(table_info)
     except Exception as e:
         return f"Error retrieving tables: {str(e)}"
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
 
 @mcp.tool()
 def run_sql_query(sql: str) -> str:
     """Execute SQL queries on Databricks SQL warehouse"""
-    conn = get_databricks_connection()
-
     try:
+        conn = get_databricks_connection()
         cursor = conn.cursor()
         result = cursor.execute(sql)
-        
+
         if result.description:
             # Get column names
             columns = [col[0] for col in result.description]
-            
+
             # Format the result as a table
             rows = result.fetchall()
             if not rows:
+                conn.close()
                 return "Query executed successfully. No results returned."
-            
+
             # Format as markdown table
             table = "| " + " | ".join(columns) + " |\n"
             table += "| " + " | ".join(["---" for _ in columns]) + " |\n"
-            
+
             for row in rows:
                 table += "| " + " | ".join([str(cell) for cell in row]) + " |\n"
-                
+
+            conn.close()
             return table
         else:
+            conn.close()
             return "Query executed successfully. No results returned."
     except Exception as e:
         return f"Error executing query: {str(e)}"
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
 
 @mcp.tool()
 def list_jobs() -> str:
     """List all Databricks jobs"""
     try:
         response = databricks_api_request("jobs/list")
-        
+
         if not response.get("jobs"):
             return "No jobs found."
-        
+
         jobs = response.get("jobs", [])
-        
+
         # Format as markdown table
         table = "| Job ID | Job Name | Created By |\n"
         table += "| ------ | -------- | ---------- |\n"
-        
+
         for job in jobs:
             job_id = job.get("job_id", "N/A")
             job_name = job.get("settings", {}).get("name", "N/A")
             created_by = job.get("created_by", "N/A")
-            
+
             table += f"| {job_id} | {job_name} | {created_by} |\n"
-        
+
         return table
     except Exception as e:
         return f"Error listing jobs: {str(e)}"
+
 
 @mcp.tool()
 def get_job_status(job_id: int) -> str:
     """Get the status of a specific Databricks job"""
     try:
         response = databricks_api_request("jobs/runs/list", data={"job_id": job_id})
-        
+
         if not response.get("runs"):
             return f"No runs found for job ID {job_id}."
-        
+
         runs = response.get("runs", [])
-        
+
         # Format as markdown table
         table = "| Run ID | State | Start Time | End Time | Duration |\n"
         table += "| ------ | ----- | ---------- | -------- | -------- |\n"
-        
+
         for run in runs:
             run_id = run.get("run_id", "N/A")
             state = run.get("state", {}).get("result_state", "N/A")
-            
+
             # Convert timestamps to readable format if they exist
             start_time = run.get("start_time", 0)
             end_time = run.get("end_time", 0)
-            
+
             if start_time and end_time:
                 duration = f"{(end_time - start_time) / 1000:.2f}s"
             else:
                 duration = "N/A"
-            
+
             # Format timestamps
             import datetime
             start_time_str = datetime.datetime.fromtimestamp(start_time / 1000).strftime('%Y-%m-%d %H:%M:%S') if start_time else "N/A"
             end_time_str = datetime.datetime.fromtimestamp(end_time / 1000).strftime('%Y-%m-%d %H:%M:%S') if end_time else "N/A"
-            
+
             table += f"| {run_id} | {state} | {start_time_str} | {end_time_str} | {duration} |\n"
-        
+
         return table
     except Exception as e:
         return f"Error getting job status: {str(e)}"
+
 
 @mcp.tool()
 def get_job_details(job_id: int) -> str:
     """Get detailed information about a specific Databricks job"""
     try:
         response = databricks_api_request(f"jobs/get?job_id={job_id}", method="GET")
-        
+
         # Format the job details
         job_name = response.get("settings", {}).get("name", "N/A")
         created_time = response.get("created_time", 0)
-        
+
         # Convert timestamp to readable format
         import datetime
         created_time_str = datetime.datetime.fromtimestamp(created_time / 1000).strftime('%Y-%m-%d %H:%M:%S') if created_time else "N/A"
-        
+
         # Get job tasks
         tasks = response.get("settings", {}).get("tasks", [])
-        
+
         result = f"## Job Details: {job_name}\n\n"
         result += f"- **Job ID:** {job_id}\n"
         result += f"- **Created:** {created_time_str}\n"
         result += f"- **Creator:** {response.get('creator_user_name', 'N/A')}\n\n"
-        
+
         if tasks:
             result += "### Tasks:\n\n"
             result += "| Task Key | Task Type | Description |\n"
             result += "| -------- | --------- | ----------- |\n"
-            
+
             for task in tasks:
                 task_key = task.get("task_key", "N/A")
                 task_type = next(iter([k for k in task.keys() if k.endswith("_task")]), "N/A")
                 description = task.get("description", "N/A")
-                
+
                 result += f"| {task_key} | {task_type} | {description} |\n"
-        
+
         return result
     except Exception as e:
         return f"Error getting job details: {str(e)}"
+
 
 @mcp.tool()
 def create_cluster(
@@ -281,10 +387,9 @@ def create_cluster(
     wait_for_completion: bool = False
 ) -> str:
     """Create a Databricks cluster with the specified configuration"""
-    if w is None:
-        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
-    
     try:
+        w = get_workspace_client()
+
         # Generate cluster configuration
         config = get_cluster_config(
             cluster_name=cluster_name,
@@ -297,7 +402,7 @@ def create_cluster(
             use_ml_runtime=use_ml_runtime,
             is_single_node=is_single_node
         )
-        
+
         if wait_for_completion:
             # Create cluster and wait for completion
             response = w.clusters.create_and_wait(**config)
@@ -308,21 +413,21 @@ def create_cluster(
             response = w.clusters.create(**config)
             logger.info(f"Cluster creation initiated: {response.cluster_id}")
             return f"Cluster '{cluster_name}' creation initiated with ID: {response.cluster_id}"
-            
+
     except Exception as e:
         logger.error(f"Failed to create cluster: {e}")
         return f"Error creating cluster: {str(e)}"
 
+
 @mcp.tool()
 def delete_cluster(cluster_id: str, confirm: bool = False) -> str:
     """Delete a Databricks cluster with confirmation"""
-    if w is None:
-        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
-    
-    if not confirm:
-        return "Deletion not confirmed. Set confirm=True to proceed with cluster deletion."
-    
     try:
+        w = get_workspace_client()
+
+        if not confirm:
+            return "Deletion not confirmed. Set confirm=True to proceed with cluster deletion."
+
         w.clusters.permanent_delete(cluster_id=cluster_id)
         logger.info(f"Cluster {cluster_id} deleted successfully")
         return f"Cluster {cluster_id} deleted successfully"
@@ -330,22 +435,21 @@ def delete_cluster(cluster_id: str, confirm: bool = False) -> str:
         logger.error(f"Failed to delete cluster {cluster_id}: {e}")
         return f"Error deleting cluster {cluster_id}: {str(e)}"
 
+
 @mcp.tool()
 def list_clusters() -> str:
     """List all Databricks clusters"""
-    if w is None:
-        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
-    
     try:
+        w = get_workspace_client()
         clusters = w.clusters.list()
-        
+
         if not clusters:
             return "No clusters found."
-        
+
         # Format as markdown table
         table = "| Cluster ID | Cluster Name | State | Spark Version | Node Type | Workers |\n"
         table += "| ---------- | ------------ | ----- | ------------- | --------- | ------- |\n"
-        
+
         for cluster in clusters:
             cluster_id = cluster.cluster_id or "N/A"
             cluster_name = cluster.cluster_name or "N/A"
@@ -353,23 +457,22 @@ def list_clusters() -> str:
             spark_version = cluster.spark_version or "N/A"
             node_type = cluster.node_type_id or "N/A"
             workers = f"{cluster.num_workers}" if cluster.num_workers else "N/A"
-            
+
             table += f"| {cluster_id} | {cluster_name} | {state} | {spark_version} | {node_type} | {workers} |\n"
-        
+
         return table
     except Exception as e:
         logger.error(f"Failed to list clusters: {e}")
         return f"Error listing clusters: {str(e)}"
 
+
 @mcp.tool()
 def get_cluster_status(cluster_id: str) -> str:
     """Get the status and details of a specific Databricks cluster"""
-    if w is None:
-        return "Error: WorkspaceClient not initialized. Please check your Databricks credentials."
-    
     try:
+        w = get_workspace_client()
         cluster = w.clusters.get(cluster_id)
-        
+
         result = f"## Cluster Details: {cluster.cluster_name}\n\n"
         result += f"- **Cluster ID:** {cluster.cluster_id}\n"
         result += f"- **State:** {cluster.state.value if cluster.state else 'N/A'}\n"
@@ -380,14 +483,20 @@ def get_cluster_status(cluster_id: str) -> str:
         result += f"- **Auto-termination:** {cluster.autotermination_minutes or 'N/A'} minutes\n"
         result += f"- **Single User:** {cluster.single_user_name or 'N/A'}\n"
         result += f"- **Created:** {cluster.start_time or 'N/A'}\n"
-        
+
         if cluster.autoscale:
             result += f"- **Auto-scaling:** Min: {cluster.autoscale.min_workers}, Max: {cluster.autoscale.max_workers}\n"
-        
+
         return result
     except Exception as e:
         logger.error(f"Failed to get cluster status: {e}")
         return f"Error getting cluster status: {str(e)}"
 
+
 if __name__ == "__main__":
-    mcp.run()
+    try:
+        logger.info("Starting MCP server...")
+        mcp.run()
+    except Exception as e:
+        logger.error(f"Fatal error starting MCP server: {e}", exc_info=True)
+        sys.exit(1)
