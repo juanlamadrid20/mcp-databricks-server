@@ -84,19 +84,22 @@ def test_profile_connection():
         # Test 3: SQL Connection with profile
         print(f"\n4. Testing SQL connection with profile '{profile_name}'...")
         try:
-            # Use SDK config to get auth token
-            cfg = Config(profile=profile_name)
-            auth_provider = cfg.authenticate()
+            # Use databricks CLI to get the token (same as main.py implementation)
+            import json
+            import subprocess
             
-            # Extract token from auth provider
-            if callable(auth_provider):
-                auth_result = auth_provider()
-                if isinstance(auth_result, dict) and 'Authorization' in auth_result:
-                    token = auth_result['Authorization'].replace('Bearer ', '')
-                else:
-                    token = str(auth_result)
-            else:
-                token = str(auth_provider)
+            result = subprocess.run(
+                ['databricks', 'auth', 'token', '--profile', profile_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True
+            )
+            
+            # Parse the JSON response and extract access_token
+            token_data = json.loads(result.stdout)
+            token = token_data['access_token']
+            print(f"      Token obtained (expires: {token_data.get('expiry', 'N/A')})")
             
             conn = connect(
                 server_hostname=credentials['host'],

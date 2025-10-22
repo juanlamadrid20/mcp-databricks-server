@@ -75,24 +75,41 @@ def get_databricks_connection() -> Connection:
             logger.info(f"Connecting to SQL warehouse using profile: {credentials['profile']}")
             # For profile-based auth, we need to get the access token from the SDK
             # The SQL connector doesn't directly support profiles, so we extract the token
-            from databricks.sdk.core import Config
+            import json
+            import subprocess
             
-            # Create SDK config with profile and authenticate to get token
-            cfg = Config(profile=credentials['profile'])
-            auth_provider = cfg.authenticate()
-            
-            # Get the token from the auth provider
-            # The auth provider returns a function that gets the header dict
-            if callable(auth_provider):
-                auth_result = auth_provider()
-                # Extract token from Authorization header
-                if isinstance(auth_result, dict) and 'Authorization' in auth_result:
-                    token = auth_result['Authorization'].replace('Bearer ', '')
-                else:
-                    # Fallback: auth_result might be the token directly
-                    token = str(auth_result)
-            else:
-                token = str(auth_provider)
+            # Use databricks CLI to get the token
+            # The CLI auth returns a JSON object with access_token, token_type, expiry, etc.
+            try:
+                result = subprocess.run(
+                    ['databricks', 'auth', 'token', '--profile', credentials['profile']],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True
+                )
+                
+                # Parse the JSON response
+                token_data = json.loads(result.stdout)
+                token = token_data['access_token']
+                logger.info(f"Successfully obtained token from CLI (expires: {token_data.get('expiry', 'N/A')})")
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to get token from databricks CLI: {e.stderr}")
+                raise ValueError(
+                    f"Failed to authenticate using profile '{credentials['profile']}'. "
+                    f"Ensure 'databricks' CLI is installed and configured."
+                )
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse token from CLI output: {e}")
+                raise ValueError(
+                    f"Invalid token format from databricks CLI for profile '{credentials['profile']}'"
+                )
+            except FileNotFoundError:
+                logger.error("databricks CLI not found in PATH")
+                raise ValueError(
+                    "databricks CLI not found. Please install it: pip install databricks-cli"
+                )
             
             return connect(
                 server_hostname=credentials['host'],
