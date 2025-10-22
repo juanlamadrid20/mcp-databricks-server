@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 from threading import Thread, Event
 import signal
+import subprocess
+import json
 
 # CRITICAL FIX: Set working directory to the script's directory
 # This ensures environments.yaml can be found regardless of where the script is run from
@@ -92,6 +94,55 @@ def run_with_timeout(func, timeout_seconds=5):
         )
 
 
+def get_token_from_cli(profile: str) -> str:
+    """
+    Get authentication token from Databricks CLI.
+    
+    This is more reliable than trying to extract from WorkspaceClient
+    as it directly uses the CLI's authentication mechanism.
+    
+    Args:
+        profile: The Databricks CLI profile name
+        
+    Returns:
+        Access token string
+        
+    Raises:
+        ValueError: If unable to get token from CLI
+    """
+    try:
+        result = subprocess.run(
+            ["databricks", "auth", "token", "--profile", profile],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode != 0:
+            raise ValueError(f"CLI returned error: {result.stderr}")
+        
+        # Parse JSON output
+        token_data = json.loads(result.stdout)
+        access_token = token_data.get("access_token")
+        
+        if not access_token:
+            raise ValueError("No access_token in CLI response")
+        
+        logger.info(f"Successfully obtained token from CLI for profile: {profile}")
+        return access_token
+        
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(
+            f"Databricks CLI timed out getting token for profile '{profile}'. "
+            f"This may indicate expired credentials. "
+            f"Please run: databricks auth login --profile {profile}"
+        )
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse CLI output: {e}")
+    except Exception as e:
+        raise ValueError(f"Failed to get token from CLI: {e}")
+
+
 def get_env_manager() -> EnvironmentManager:
     """Get or initialize the environment manager lazily."""
     global env_manager
@@ -124,26 +175,9 @@ def get_databricks_connection() -> Connection:
         # Profile-based authentication
         if 'profile' in credentials:
             logger.info(f"Connecting to SQL warehouse using profile: {credentials['profile']}")
-            # Use WorkspaceClient to get a valid token (it handles auth internally)
             try:
-                def get_token():
-                    # Initialize WorkspaceClient with the profile (this handles auth)
-                    client = WorkspaceClient(profile=credentials['profile'])
-                    
-                    # Get the auth provider's token directly using the internal API
-                    # This avoids triggering interactive auth flows
-                    token_headers = client.config.authenticate()({})
-                    
-                    # Extract token from Authorization header
-                    auth_header = token_headers.get("Authorization", "")
-                    if not auth_header.startswith("Bearer "):
-                        raise ValueError("Failed to get valid Bearer token from WorkspaceClient")
-                    
-                    return auth_header[7:]  # Remove "Bearer " prefix
-                
-                # Run with timeout to detect hanging authentication
-                access_token = run_with_timeout(get_token, timeout_seconds=3)
-                logger.info(f"Successfully obtained token for profile: {credentials['profile']}")
+                # Get token directly from Databricks CLI (fast and reliable)
+                access_token = get_token_from_cli(credentials['profile'])
                 
             except TimeoutError as e:
                 logger.error(f"Authentication timed out for profile: {credentials['profile']}")
@@ -153,7 +187,7 @@ def get_databricks_connection() -> Connection:
                     f"Please run: databricks auth login --profile {credentials['profile']}"
                 )
             except Exception as e:
-                logger.error(f"Failed to get token using WorkspaceClient: {e}")
+                logger.error(f"Failed to get token from CLI: {e}")
                 raise ValueError(
                     f"Failed to authenticate using profile '{credentials['profile']}'. "
                     f"Error: {str(e)}\n"
@@ -251,27 +285,10 @@ def databricks_api_request(endpoint: str, method: str = "GET", data: Dict = None
 
         # Get the access token based on authentication method
         if 'profile' in credentials:
-            # Profile-based: Get token from WorkspaceClient (avoids interactive auth)
+            # Profile-based: Get token from Databricks CLI
             logger.info(f"Getting token from profile: {credentials['profile']}")
             try:
-                def get_token():
-                    client = WorkspaceClient(profile=credentials['profile'])
-                    # Get token without triggering interactive flows
-                    token_headers = client.config.authenticate()({})
-                    auth_header = token_headers.get("Authorization", "")
-                    if auth_header.startswith("Bearer "):
-                        return auth_header[7:]  # Remove "Bearer " prefix
-                    else:
-                        raise ValueError("Failed to get valid authentication token")
-                
-                # Run with timeout to detect hanging authentication
-                token = run_with_timeout(get_token, timeout_seconds=3)
-            except TimeoutError as e:
-                logger.error(f"Authentication timed out for profile: {credentials['profile']}")
-                raise ValueError(
-                    f"Authentication timed out for profile '{credentials['profile']}'. "
-                    f"Please run: databricks auth login --profile {credentials['profile']}"
-                )
+                token = get_token_from_cli(credentials['profile'])
             except Exception as e:
                 logger.error(f"Failed to get token for API request: {e}")
                 raise ValueError(f"Authentication failed for profile '{credentials['profile']}': {e}")
