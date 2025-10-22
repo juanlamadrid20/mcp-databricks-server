@@ -73,17 +73,31 @@ def get_databricks_connection() -> Connection:
         # Profile-based authentication
         if 'profile' in credentials:
             logger.info(f"Connecting to SQL warehouse using profile: {credentials['profile']}")
-            # When using profile, the SDK will automatically handle authentication
-            # We still need to provide server_hostname and http_path explicitly
+            # For profile-based auth, we need to get the access token from the SDK
+            # The SQL connector doesn't directly support profiles, so we extract the token
             from databricks.sdk.core import Config
             
-            # Create SDK config with profile
+            # Create SDK config with profile and authenticate to get token
             cfg = Config(profile=credentials['profile'])
+            auth_provider = cfg.authenticate()
+            
+            # Get the token from the auth provider
+            # The auth provider returns a function that gets the header dict
+            if callable(auth_provider):
+                auth_result = auth_provider()
+                # Extract token from Authorization header
+                if isinstance(auth_result, dict) and 'Authorization' in auth_result:
+                    token = auth_result['Authorization'].replace('Bearer ', '')
+                else:
+                    # Fallback: auth_result might be the token directly
+                    token = str(auth_result)
+            else:
+                token = str(auth_provider)
             
             return connect(
                 server_hostname=credentials['host'],
                 http_path=credentials['http_path'],
-                credentials_provider=cfg.authenticate
+                access_token=token
             )
         
         # Token-based authentication (legacy)
@@ -163,8 +177,14 @@ def databricks_api_request(endpoint: str, method: str = "GET", data: Dict = None
             logger.info(f"Getting token from profile: {credentials['profile']}")
             from databricks.sdk.core import Config
             cfg = Config(profile=credentials['profile'])
-            # Authenticate and get the token
-            token = cfg.authenticate()
+            # Get the authentication headers using the credentials provider
+            auth_headers = cfg.authenticate()("GET", f"https://{credentials['host']}/api/2.0/{endpoint}")
+            # Extract the token from Authorization header
+            auth_header = auth_headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]  # Remove "Bearer " prefix
+            else:
+                raise ValueError("Failed to get valid authentication token")
         else:
             # Token-based: Use provided token
             token = credentials['token']
