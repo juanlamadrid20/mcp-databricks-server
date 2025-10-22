@@ -11,6 +11,15 @@ from mcp.server.fastmcp import FastMCP
 import requests
 import logging
 import sys
+import os
+from pathlib import Path
+from threading import Thread, Event
+import signal
+
+# CRITICAL FIX: Set working directory to the script's directory
+# This ensures environments.yaml can be found regardless of where the script is run from
+script_dir = Path(__file__).parent.resolve()
+os.chdir(script_dir)
 
 # CRITICAL FIX: Remove all existing handlers and force everything to stderr
 for handler in logging.root.handlers[:]:
@@ -39,6 +48,48 @@ w = None
 
 # Set up the MCP server
 mcp = FastMCP("Databricks API Explorer")
+
+
+def run_with_timeout(func, timeout_seconds=5):
+    """
+    Run a function with a timeout to prevent hanging on authentication.
+    
+    Args:
+        func: Callable to execute
+        timeout_seconds: Maximum seconds to wait before timing out
+        
+    Returns:
+        Result of the function call
+        
+    Raises:
+        TimeoutError: If function doesn't complete within timeout
+        Exception: Any exception raised by the function
+    """
+    result = [None]
+    error = [None]
+    done = Event()
+    
+    def wrapper():
+        try:
+            result[0] = func()
+        except Exception as e:
+            error[0] = e
+        finally:
+            done.set()
+    
+    thread = Thread(target=wrapper, daemon=True)
+    thread.start()
+    
+    if done.wait(timeout_seconds):
+        if error[0]:
+            raise error[0]
+        return result[0]
+    else:
+        raise TimeoutError(
+            f"Operation timed out after {timeout_seconds} seconds. "
+            f"This likely indicates an authentication issue requiring interactive login. "
+            f"Please run: databricks auth login --profile <your-profile>"
+        )
 
 
 def get_env_manager() -> EnvironmentManager:
@@ -73,48 +124,47 @@ def get_databricks_connection() -> Connection:
         # Profile-based authentication
         if 'profile' in credentials:
             logger.info(f"Connecting to SQL warehouse using profile: {credentials['profile']}")
-            # For profile-based auth, we need to get the access token from the SDK
-            # The SQL connector doesn't directly support profiles, so we extract the token
-            import json
-            import subprocess
-            
-            # Use databricks CLI to get the token
-            # The CLI auth returns a JSON object with access_token, token_type, expiry, etc.
+            # Use WorkspaceClient to get a valid token (it handles auth internally)
             try:
-                result = subprocess.run(
-                    ['databricks', 'auth', 'token', '--profile', credentials['profile']],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=True
+                def get_token():
+                    # Initialize WorkspaceClient with the profile (this handles auth)
+                    client = WorkspaceClient(profile=credentials['profile'])
+                    
+                    # Get the auth provider's token directly using the internal API
+                    # This avoids triggering interactive auth flows
+                    token_headers = client.config.authenticate()({})
+                    
+                    # Extract token from Authorization header
+                    auth_header = token_headers.get("Authorization", "")
+                    if not auth_header.startswith("Bearer "):
+                        raise ValueError("Failed to get valid Bearer token from WorkspaceClient")
+                    
+                    return auth_header[7:]  # Remove "Bearer " prefix
+                
+                # Run with timeout to detect hanging authentication
+                access_token = run_with_timeout(get_token, timeout_seconds=3)
+                logger.info(f"Successfully obtained token for profile: {credentials['profile']}")
+                
+            except TimeoutError as e:
+                logger.error(f"Authentication timed out for profile: {credentials['profile']}")
+                raise ValueError(
+                    f"Authentication timed out for profile '{credentials['profile']}'. "
+                    f"This usually means the token has expired or authentication is configured for interactive mode.\n"
+                    f"Please run: databricks auth login --profile {credentials['profile']}"
                 )
-                
-                # Parse the JSON response
-                token_data = json.loads(result.stdout)
-                token = token_data['access_token']
-                logger.info(f"Successfully obtained token from CLI (expires: {token_data.get('expiry', 'N/A')})")
-                
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to get token from databricks CLI: {e.stderr}")
+            except Exception as e:
+                logger.error(f"Failed to get token using WorkspaceClient: {e}")
                 raise ValueError(
                     f"Failed to authenticate using profile '{credentials['profile']}'. "
-                    f"Ensure 'databricks' CLI is installed and configured."
-                )
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse token from CLI output: {e}")
-                raise ValueError(
-                    f"Invalid token format from databricks CLI for profile '{credentials['profile']}'"
-                )
-            except FileNotFoundError:
-                logger.error("databricks CLI not found in PATH")
-                raise ValueError(
-                    "databricks CLI not found. Please install it: pip install databricks-cli"
+                    f"Error: {str(e)}\n"
+                    f"Ensure your profile is properly configured in ~/.databrickscfg and "
+                    f"run 'databricks auth login --profile {credentials['profile']}' if needed."
                 )
             
             return connect(
                 server_hostname=credentials['host'],
                 http_path=credentials['http_path'],
-                access_token=token
+                access_token=access_token
             )
         
         # Token-based authentication (legacy)
@@ -154,7 +204,18 @@ def get_workspace_client() -> WorkspaceClient:
         # Profile-based authentication
         if 'profile' in credentials:
             logger.info(f"Initializing WorkspaceClient using profile: {credentials['profile']}")
-            w = WorkspaceClient(profile=credentials['profile'])
+            try:
+                def init_client():
+                    return WorkspaceClient(profile=credentials['profile'])
+                
+                # Run with timeout to detect hanging authentication
+                w = run_with_timeout(init_client, timeout_seconds=3)
+            except TimeoutError as e:
+                logger.error(f"WorkspaceClient initialization timed out for profile: {credentials['profile']}")
+                raise ValueError(
+                    f"Authentication timed out for profile '{credentials['profile']}'. "
+                    f"Please run: databricks auth login --profile {credentials['profile']}"
+                )
         
         # Token-based authentication (legacy)
         else:
@@ -190,18 +251,30 @@ def databricks_api_request(endpoint: str, method: str = "GET", data: Dict = None
 
         # Get the access token based on authentication method
         if 'profile' in credentials:
-            # Profile-based: Get token from SDK's unified auth
+            # Profile-based: Get token from WorkspaceClient (avoids interactive auth)
             logger.info(f"Getting token from profile: {credentials['profile']}")
-            from databricks.sdk.core import Config
-            cfg = Config(profile=credentials['profile'])
-            # Get the authentication headers using the credentials provider
-            auth_headers = cfg.authenticate()("GET", f"https://{credentials['host']}/api/2.0/{endpoint}")
-            # Extract the token from Authorization header
-            auth_header = auth_headers.get("Authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:]  # Remove "Bearer " prefix
-            else:
-                raise ValueError("Failed to get valid authentication token")
+            try:
+                def get_token():
+                    client = WorkspaceClient(profile=credentials['profile'])
+                    # Get token without triggering interactive flows
+                    token_headers = client.config.authenticate()({})
+                    auth_header = token_headers.get("Authorization", "")
+                    if auth_header.startswith("Bearer "):
+                        return auth_header[7:]  # Remove "Bearer " prefix
+                    else:
+                        raise ValueError("Failed to get valid authentication token")
+                
+                # Run with timeout to detect hanging authentication
+                token = run_with_timeout(get_token, timeout_seconds=3)
+            except TimeoutError as e:
+                logger.error(f"Authentication timed out for profile: {credentials['profile']}")
+                raise ValueError(
+                    f"Authentication timed out for profile '{credentials['profile']}'. "
+                    f"Please run: databricks auth login --profile {credentials['profile']}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to get token for API request: {e}")
+                raise ValueError(f"Authentication failed for profile '{credentials['profile']}': {e}")
         else:
             # Token-based: Use provided token
             token = credentials['token']

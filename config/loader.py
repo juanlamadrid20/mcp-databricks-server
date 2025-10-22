@@ -160,6 +160,13 @@ def auto_load_configuration(
         FileNotFoundError: If neither configuration file exists
         ValueError: If configuration is invalid
     """
+    # DEBUG: Log current working directory
+    current_dir = os.getcwd()
+    logger.info(f"DEBUG: Current working directory: {current_dir}")
+    logger.info(f"DEBUG: Looking for yaml_file: {yaml_file}")
+    logger.info(f"DEBUG: yaml_file exists: {os.path.exists(yaml_file)}")
+    logger.info(f"DEBUG: Absolute path to yaml_file: {os.path.abspath(yaml_file)}")
+    
     # First, try to load from YAML
     if os.path.exists(yaml_file):
         # Warn if both files exist
@@ -180,5 +187,6 @@ def auto_load_configuration(
         f"No configuration file found. Please create either:\n"
         f"  - {yaml_file} (recommended for multiple environments)\n"
         f"  - {env_file} (legacy single environment)\n"
-        f"See environments.yaml.template for an example."
+        f"See environments.yaml.template for an example.\n"
+        f"DEBUG: Current working directory was: {current_dir}"
     )
