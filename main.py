@@ -58,18 +58,73 @@ def get_env_manager() -> EnvironmentManager:
 
 # Helper function to get a Databricks SQL connection
 def get_databricks_connection() -> Connection:
-    """Create and return a Databricks SQL connection using active environment"""
+    """Create and return a Databricks SQL connection using active environment.
+    
+    Supports both token-based and profile-based authentication:
+    - Token-based: Uses access_token parameter
+    - Profile-based: Uses Databricks SDK's unified auth (reads from ~/.databrickscfg)
+    """
     try:
         credentials = get_env_manager().get_active_credentials()
 
         if not credentials:
             raise ValueError("No active environment configured")
 
-        return connect(
-            server_hostname=credentials['host'],
-            http_path=credentials['http_path'],
-            access_token=credentials['token']
-        )
+        # Profile-based authentication
+        if 'profile' in credentials:
+            logger.info(f"Connecting to SQL warehouse using profile: {credentials['profile']}")
+            # For profile-based auth, we need to get the access token from the SDK
+            # The SQL connector doesn't directly support profiles, so we extract the token
+            import json
+            import subprocess
+            
+            # Use databricks CLI to get the token
+            # The CLI auth returns a JSON object with access_token, token_type, expiry, etc.
+            try:
+                result = subprocess.run(
+                    ['databricks', 'auth', 'token', '--profile', credentials['profile']],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True
+                )
+                
+                # Parse the JSON response
+                token_data = json.loads(result.stdout)
+                token = token_data['access_token']
+                logger.info(f"Successfully obtained token from CLI (expires: {token_data.get('expiry', 'N/A')})")
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to get token from databricks CLI: {e.stderr}")
+                raise ValueError(
+                    f"Failed to authenticate using profile '{credentials['profile']}'. "
+                    f"Ensure 'databricks' CLI is installed and configured."
+                )
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse token from CLI output: {e}")
+                raise ValueError(
+                    f"Invalid token format from databricks CLI for profile '{credentials['profile']}'"
+                )
+            except FileNotFoundError:
+                logger.error("databricks CLI not found in PATH")
+                raise ValueError(
+                    "databricks CLI not found. Please install it: pip install databricks-cli"
+                )
+            
+            return connect(
+                server_hostname=credentials['host'],
+                http_path=credentials['http_path'],
+                access_token=token
+            )
+        
+        # Token-based authentication (legacy)
+        else:
+            logger.info("Connecting to SQL warehouse using token authentication")
+            return connect(
+                server_hostname=credentials['host'],
+                http_path=credentials['http_path'],
+                access_token=credentials['token']
+            )
     except Exception as e:
         active_env = get_env_manager().get_active_environment_name()
         logger.error(f"Failed to connect to Databricks: {e}")
@@ -82,7 +137,12 @@ def get_databricks_connection() -> Connection:
 
 
 def get_workspace_client() -> WorkspaceClient:
-    """Get or initialize WorkspaceClient with active environment credentials"""
+    """Get or initialize WorkspaceClient with active environment credentials.
+    
+    Supports both token-based and profile-based authentication:
+    - Token-based: Explicitly provides host and token
+    - Profile-based: Uses profile name, SDK auto-detects auth from ~/.databrickscfg
+    """
     global w
 
     try:
@@ -91,11 +151,19 @@ def get_workspace_client() -> WorkspaceClient:
         if not credentials:
             raise ValueError("No active environment configured")
 
-        # Create new WorkspaceClient with current credentials
-        w = WorkspaceClient(
-            host=f"https://{credentials['host']}",
-            token=credentials['token']
-        )
+        # Profile-based authentication
+        if 'profile' in credentials:
+            logger.info(f"Initializing WorkspaceClient using profile: {credentials['profile']}")
+            w = WorkspaceClient(profile=credentials['profile'])
+        
+        # Token-based authentication (legacy)
+        else:
+            logger.info("Initializing WorkspaceClient using token authentication")
+            w = WorkspaceClient(
+                host=f"https://{credentials['host']}",
+                token=credentials['token']
+            )
+        
         return w
     except Exception as e:
         active_env = get_env_manager().get_active_environment_name()
@@ -109,15 +177,37 @@ def get_workspace_client() -> WorkspaceClient:
 
 # Helper function for Databricks REST API requests
 def databricks_api_request(endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
-    """Make a request to the Databricks REST API using active environment credentials"""
+    """Make a request to the Databricks REST API using active environment credentials.
+    
+    For profile-based authentication, retrieves the token from the SDK's auth provider.
+    For token-based authentication, uses the provided token directly.
+    """
     try:
         credentials = get_env_manager().get_active_credentials()
 
         if not credentials:
             raise ValueError("No active environment configured")
 
+        # Get the access token based on authentication method
+        if 'profile' in credentials:
+            # Profile-based: Get token from SDK's unified auth
+            logger.info(f"Getting token from profile: {credentials['profile']}")
+            from databricks.sdk.core import Config
+            cfg = Config(profile=credentials['profile'])
+            # Get the authentication headers using the credentials provider
+            auth_headers = cfg.authenticate()("GET", f"https://{credentials['host']}/api/2.0/{endpoint}")
+            # Extract the token from Authorization header
+            auth_header = auth_headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]  # Remove "Bearer " prefix
+            else:
+                raise ValueError("Failed to get valid authentication token")
+        else:
+            # Token-based: Use provided token
+            token = credentials['token']
+
         headers = {
-            "Authorization": f"Bearer {credentials['token']}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
 
