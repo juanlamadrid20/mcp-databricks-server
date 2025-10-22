@@ -111,35 +111,102 @@ def get_token_from_cli(profile: str) -> str:
         ValueError: If unable to get token from CLI
     """
     try:
+        logger.info(f"Getting token from CLI for profile: {profile}")
+        
+        # Check for environment variable first (allows platform-specific config)
+        databricks_cmd = os.getenv("DATABRICKS_CLI_PATH")
+        
+        if not databricks_cmd:
+            # Try to find databricks CLI in common locations (cross-platform)
+            databricks_paths = [
+                "databricks",  # Try PATH first (works on all platforms)
+            ]
+            
+            # Add platform-specific paths
+            import platform
+            if platform.system() == "Windows":
+                # Windows-specific locations
+                username = os.getenv("USERNAME", "")
+                if username:
+                    databricks_paths.extend([
+                        rf"C:\Users\{username}\AppData\Local\Microsoft\WinGet\Packages\Databricks.DatabricksCLI_Microsoft.Winget.Source_8wekyb3d8bbwe\databricks.exe",
+                    ])
+            elif platform.system() == "Darwin":  # macOS
+                # macOS-specific locations (Homebrew)
+                databricks_paths.extend([
+                    "/usr/local/bin/databricks",
+                    "/opt/homebrew/bin/databricks",
+                    os.path.expanduser("~/.local/bin/databricks"),
+                ])
+            else:  # Linux
+                databricks_paths.extend([
+                    "/usr/local/bin/databricks",
+                    "/usr/bin/databricks",
+                    os.path.expanduser("~/.local/bin/databricks"),
+                ])
+            
+            # Find first working databricks CLI
+            for path in databricks_paths:
+                try:
+                    test_result = subprocess.run(
+                        [path, "--version"],
+                        capture_output=True,
+                        timeout=2
+                    )
+                    if test_result.returncode == 0:
+                        databricks_cmd = path
+                        logger.info(f"Found databricks CLI at: {path}")
+                        break
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+            
+            if not databricks_cmd:
+                raise FileNotFoundError(
+                    "Databricks CLI not found. Please either:\n"
+                    "1. Install databricks CLI and ensure it's in PATH, or\n"
+                    "2. Set DATABRICKS_CLI_PATH environment variable in mcp.json"
+                )
+        else:
+            logger.info(f"Using databricks CLI from DATABRICKS_CLI_PATH env var: {databricks_cmd}")
+        
         result = subprocess.run(
-            ["databricks", "auth", "token", "--profile", profile],
+            [databricks_cmd, "auth", "token", "--profile", profile],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=10  # Increased from 5 to 10 seconds
         )
         
         if result.returncode != 0:
+            logger.error(f"CLI returned error code {result.returncode}: {result.stderr}")
             raise ValueError(f"CLI returned error: {result.stderr}")
         
         # Parse JSON output
+        logger.debug(f"Parsing CLI output (length: {len(result.stdout)} bytes)")
         token_data = json.loads(result.stdout)
         access_token = token_data.get("access_token")
         
         if not access_token:
+            logger.error("No access_token found in CLI response")
             raise ValueError("No access_token in CLI response")
         
         logger.info(f"Successfully obtained token from CLI for profile: {profile}")
         return access_token
         
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        logger.error(f"Databricks CLI command timed out after 10 seconds for profile: {profile}")
         raise TimeoutError(
             f"Databricks CLI timed out getting token for profile '{profile}'. "
             f"This may indicate expired credentials. "
             f"Please run: databricks auth login --profile {profile}"
         )
     except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse CLI JSON output: {e}. Output was: {result.stdout[:200]}")
         raise ValueError(f"Failed to parse CLI output: {e}")
+    except FileNotFoundError as e:
+        logger.error(f"Databricks CLI command not found - is it installed and in PATH?")
+        raise ValueError(f"Databricks CLI not found. Please ensure 'databricks' command is in PATH")
     except Exception as e:
+        logger.error(f"Unexpected error getting token from CLI: {type(e).__name__}: {e}")
         raise ValueError(f"Failed to get token from CLI: {e}")
 
 
