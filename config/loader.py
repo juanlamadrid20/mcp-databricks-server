@@ -160,6 +160,14 @@ def auto_load_configuration(
         FileNotFoundError: If neither configuration file exists
         ValueError: If configuration is invalid
     """
+    # DEBUG: Log current working directory and file paths
+    cwd = os.getcwd()
+    yaml_full_path = os.path.abspath(yaml_file)
+    env_full_path = os.path.abspath(env_file)
+    logger.info(f"DEBUG: Current working directory: {cwd}")
+    logger.info(f"DEBUG: Looking for YAML file: {yaml_full_path} (exists: {os.path.exists(yaml_file)})")
+    logger.info(f"DEBUG: Looking for ENV file: {env_full_path} (exists: {os.path.exists(env_file)})")
+    
     # First, try to load from YAML
     if os.path.exists(yaml_file):
         # Warn if both files exist
