@@ -5,32 +5,58 @@
 default: development
 
 environments:
+  # ============================================================================
+  # Profile-Based Authentication (Recommended)
+  # ============================================================================
+  # Uses authentication from ~/.databrickscfg file
+  # Supports: Personal Access Tokens, OAuth, Azure CLI, etc.
+  # Benefits: Centralized auth management, automatic token refresh
+  
   development:
     name: development
+    profile: your-dev-profile  # Must match profile name in ~/.databrickscfg
     host: YOUR_DEV_WORKSPACE.cloud.databricks.com
-    token: dapi_YOUR_DEV_TOKEN_HERE
     http_path: /sql/1.0/warehouses/YOUR_DEV_WAREHOUSE_ID
-    description: "Development environment for testing"
+    description: "Development environment using CLI authentication"
     tags:
       - dev
       - testing
+      - cli-auth
 
   staging:
     name: staging
+    profile: your-staging-profile  # Must match profile name in ~/.databrickscfg
     host: YOUR_STAGING_WORKSPACE.cloud.databricks.com
-    token: dapi_YOUR_STAGING_TOKEN_HERE
     http_path: /sql/1.0/warehouses/YOUR_STAGING_WAREHOUSE_ID
     description: "Staging environment for pre-production testing"
     tags:
       - staging
       - pre-production
+      - cli-auth
 
+  # ============================================================================
+  # Token-Based Authentication (Legacy)
+  # ============================================================================
+  # Directly embeds Personal Access Token in this file
+  # Use when you cannot use profile-based authentication
+  
   production:
     name: production
-    host: YOUR_PROD_WORKSPACE.cloud.databricks.com
     token: dapi_YOUR_PROD_TOKEN_HERE
+    host: YOUR_PROD_WORKSPACE.cloud.databricks.com
     http_path: /sql/1.0/warehouses/YOUR_PROD_WAREHOUSE_ID
-    description: "Production environment"
+    description: "Production environment with token auth"
     tags:
       - production
       - critical
+      - token-auth
+
+  # ============================================================================
+  # Notes:
+  # ============================================================================
+  # 1. Each environment must use EITHER 'token' OR 'profile' (not both)
+  # 2. Profile names must match entries in ~/.databrickscfg
+  # 3. For profile setup, run: databricks configure --profile your-profile-name
+  # 4. To view your profiles: cat ~/.databrickscfg
+  # 5. Profile-based auth supports multiple auth types (OAuth, Azure CLI, etc.)
+  # ============================================================================

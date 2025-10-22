@@ -13,11 +13,22 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class EnvironmentConfig(BaseModel):
-    """Configuration for a single Databricks environment."""
+    """Configuration for a single Databricks environment.
+    
+    Supports two authentication methods:
+    1. Token-based: Provide 'token' parameter
+    2. Profile-based: Provide 'profile' parameter (references ~/.databrickscfg)
+    
+    Exactly one authentication method must be specified.
+    """
 
     name: str = Field(..., min_length=1, max_length=50)
     host: str = Field(..., min_length=1)
-    token: str = Field(..., min_length=1)
+    
+    # Authentication: either token OR profile (mutually exclusive)
+    token: Optional[str] = Field(None, min_length=1)
+    profile: Optional[str] = Field(None, min_length=1, max_length=100)
+    
     http_path: str = Field(..., pattern=r"^/sql/1\.0/warehouses/.+$")
     description: Optional[str] = Field(None, max_length=200)
     tags: Optional[List[str]] = Field(default_factory=list)
@@ -43,10 +54,37 @@ class EnvironmentConfig(BaseModel):
     @field_validator('token')
     @classmethod
     def validate_token(cls, v):
-        """Validate token format."""
-        if not v.startswith('dapi'):
+        """Validate token format if provided."""
+        if v is not None and not v.startswith('dapi'):
             raise ValueError('Token should start with "dapi"')
         return v
+    
+    @field_validator('profile')
+    @classmethod
+    def validate_profile(cls, v):
+        """Validate profile name contains only allowed characters."""
+        if v is not None and not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError(
+                'Profile name must contain only alphanumeric characters, hyphens, and underscores'
+            )
+        return v
+    
+    @model_validator(mode='after')
+    def validate_auth_method(self):
+        """Ensure exactly one authentication method is specified."""
+        has_token = self.token is not None
+        has_profile = self.profile is not None
+        
+        if not has_token and not has_profile:
+            raise ValueError(
+                f"Environment '{self.name}': Either 'token' or 'profile' must be specified"
+            )
+        if has_token and has_profile:
+            raise ValueError(
+                f"Environment '{self.name}': Cannot specify both 'token' and 'profile'. "
+                "Choose one authentication method."
+            )
+        return self
 
     @field_validator('tags')
     @classmethod
@@ -123,12 +161,23 @@ class ActiveEnvironment(BaseModel):
     activated_at: datetime = Field(default_factory=datetime.now)
 
     def get_credentials(self) -> Dict[str, str]:
-        """Get credentials for Databricks connection."""
-        return {
+        """Get credentials for Databricks connection.
+        
+        Returns a dictionary containing connection details with either:
+        - token-based auth: host, token, http_path
+        - profile-based auth: host, profile, http_path
+        """
+        credentials = {
             'host': self.config.host,
-            'token': self.config.token,
             'http_path': self.config.http_path
         }
+        
+        if self.config.token:
+            credentials['token'] = self.config.token
+        elif self.config.profile:
+            credentials['profile'] = self.config.profile
+            
+        return credentials
 
     def to_summary(self) -> str:
         """Get a summary string for logging."""
