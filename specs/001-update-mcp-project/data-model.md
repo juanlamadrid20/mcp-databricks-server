@@ -164,14 +164,14 @@ environments:
       - demo
       - west
 
-  aithon:
-    name: aithon
+  field-eng-west-dev:
+    name: field-eng-west-dev
     host: dbc-876e9c34-9f7d.cloud.databricks.com
     token: dapi_your_token_here_2
     http_path: /sql/1.0/warehouses/ea5487ea1c4a4495
-    description: "Aithon production environment"
+    description: "Field Engineering West dev environment"
     tags:
-      - production
+      - dev
 ```
 
 **Loading from YAML**:

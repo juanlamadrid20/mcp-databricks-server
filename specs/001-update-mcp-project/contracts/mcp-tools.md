@@ -27,7 +27,7 @@ This document defines the MCP tool contracts for environment management function
 | Environment | Host | Description | Tags | Status |
 |-------------|------|-------------|------|--------|
 | field-eng-west | e2-demo-field-eng.cloud.databricks.com | Field Engineering West demo environment | demo, west | ACTIVE |
-| aithon | dbc-876e9c34-9f7d.cloud.databricks.com | Aithon production environment | production | - |
+| field-eng-west-dev | dbc-876e9c34-9f7d.cloud.databricks.com | Field Engineering West dev environment | dev | - |
 ```
 
 **Python Signature**:
@@ -83,10 +83,10 @@ def list_environments() -> str:
 **Example Output**:
 
 ```
-✓ Switched to environment: aithon
+✓ Switched to environment: field-eng-west-dev
 Host: dbc-876e9c34-9f7d.cloud.databricks.com
-Description: Aithon production environment
-Tags: production
+Description: Field Engineering West dev environment
+Tags: dev
 ```
 
 **Python Signature**:
